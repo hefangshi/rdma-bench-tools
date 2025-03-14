@@ -4,7 +4,7 @@ import subprocess
 import hashlib
 
 def run_mpirun(np_count, host_config):
-    if np_count <= 2:
+    if np_count < 2:
         return
     print(f"SERVER: {np_count} => {host_config}")
     md5 = hashlib.md5(host_config.encode()).hexdigest()
@@ -28,7 +28,7 @@ def run_mpirun(np_count, host_config):
         "-x", "NCCL_MAX_NCHANNELS=64",
         "-x", "NCCL_MIN_NCHANNELS=32",
         "-x", "NCCL_DEBUG=INFO",
-        "-x", "NCCL_IB_HCA=", os.env("NCCL_IB_HCA"),
+        "-x", "NCCL_IB_HCA=", os.environ.get("NCCL_IB_HCA"),
         "-x", "NCCL_SOCKET_IFNAME=bond0",
         "all_reduce_perf",
         "-b", "16G",

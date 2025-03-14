@@ -92,7 +92,7 @@ def run_ib_client(args):
     """
     cmd, local_device, remote_ip, cpu, append_args, port = args
     try:
-        command = f"taskset -c {cpu} {cmd} -d {local_device} -p {port}  {remote_ip} {append_args}"
+        command = f"taskset -c {cpu} {cmd} -d {local_device} -p {port} {remote_ip} {append_args}"
         print(f"Exec: {command}")
         result = subprocess.run(command, bufsize=100000, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 universal_newlines=True)
@@ -162,16 +162,28 @@ if __name__ == "__main__":
     parser.add_argument('--cmd', type=str,
                         default='ib_write_bw --report_gbits',
                         help='exec cmd')
+    parser.add_argument('--devices', type=lambda s: [item.strip() for item in s.split(',')], default=[],
+                        help='bench devices')
+    parser.add_argument('--numa', type=str,
+                        default='',
+                        help='bench numa')
+    parser.add_argument('--concurrency', type=int,
+                        default=-1,
+                        help='bench concurrency')
     parser.add_argument('--args', type=str,
                         default='',
                         help='append args')
     parser.add_argument('--rate', type=int, help='Desired NIC rate')
     args = parser.parse_args()
+
     mode = args.role
     append_args = args.args
     remote_ip = args.remote
     cmd = args.cmd
     desired_rate = args.rate
+    concurrency = args.concurrency
+    bench_numa = args.numa
+    bench_devices = args.devices
 
     local_ib_devices = get_ib_devices()
     if desired_rate is not None:
@@ -186,6 +198,10 @@ if __name__ == "__main__":
         cpu_index = {numa: 0 for numa in cpu_topology}
         for local_device in local_ib_devices:
             numa = get_ib_device_numa(local_device)
+            if bench_numa and numa != int(bench_numa):
+                continue
+            if len(bench_devices) !=0 and local_device not in bench_devices:
+                continue
             if numa is not None and numa in cpu_topology:
                 cpu_list = cpu_topology[numa]
                 if cpu_index[numa] < len(cpu_list):
@@ -197,8 +213,9 @@ if __name__ == "__main__":
                     print(f"No enough CPUs for NIC {local_device} in NUMA node {numa}")
             else:
                 print(f"No valid NUMA node or CPU list found for {local_device}")
-
-        with Pool() as pool:
+        if concurrency == -1:
+            concurrency =  len(tasks)
+        with Pool(processes=concurrency) as pool:
             pool.map(run_ib_client, tasks)
 
     elif mode == "server":
@@ -206,6 +223,10 @@ if __name__ == "__main__":
         cpu_index = {numa: 0 for numa in cpu_topology}
         for local_device in local_ib_devices:
             numa = get_ib_device_numa(local_device)
+            if bench_numa and numa != int(bench_numa):
+                continue
+            if len(bench_devices) !=0 and local_device not in bench_devices:
+                continue
             if numa is not None and numa in cpu_topology:
                 cpu_list = cpu_topology[numa]
                 if cpu_index[numa] < len(cpu_list):
@@ -217,7 +238,6 @@ if __name__ == "__main__":
                     print(f"No enough CPUs for NIC {local_device} in NUMA node {numa}")
             else:
                 print(f"No valid NUMA node or CPU list found for {local_device}")
-
         with Pool() as pool:
             pool.map(run_ib_server, tasks)
 
