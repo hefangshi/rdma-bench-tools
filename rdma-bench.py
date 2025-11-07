@@ -5,6 +5,10 @@ import sys
 from multiprocessing import Pool
 import argparse
 
+# Regex patterns for parsing output
+BANDWIDTH_PATTERN = r'#bytes\s+#iterations\s+BW peak\[Gb/sec\]\s+BW average\[Gb/sec\]\s+MsgRate\[Mpps\]\s*\n\s*\d+\s+\d+\s+[\d.]+\s+([\d.]+)\s+[\d.]+\s*'
+LATENCY_PATTERN = r'#bytes\s+#iterations\s+t_min\[usec\]\s+t_max\[usec\]\s+t_typical\[usec\]\s+t_avg\[usec\]\s+t_stdev\[usec\]\s+99%\spercentile\[usec\]\s+99.9%\spercentile\[usec\]\s*\n\s*\d+\s+\d+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+([\d.]+)'
+
 
 def get_ib_device_rate(ib_device):
     """
@@ -85,6 +89,39 @@ def get_ib_device_numa(ib_device):
     return None
 
 
+def parse_benchmark_output(output, local_device, remote_ip=None, is_server=False):
+    """
+    Parse the benchmark output to extract bandwidth or latency results.
+    :param output: The command output to parse.
+    :param local_device: Name of the local IB device.
+    :param remote_ip: Remote IP address (for client mode).
+    :param is_server: Whether this is server output.
+    :return: True if parsing was successful, False otherwise.
+    """
+    # Try to parse bandwidth results
+    match = re.search(BANDWIDTH_PATTERN, output)
+    if match:
+        bw_avg = match.group(1)
+        device_info = f"{'Server' if is_server else 'Local'} NIC: {local_device}, Rate: {get_ib_device_rate(local_device)}"
+        if remote_ip and not is_server:
+            device_info += f", Remote IP: {remote_ip}"
+        print(f"{device_info}, Avg BW: {bw_avg} Gbps")
+        return True
+
+    # Try to parse latency results
+    match = re.search(LATENCY_PATTERN, output)
+    if match:
+        lat = match.group(1)
+        device_info = f"{'Server' if is_server else 'Local'} NIC: {local_device}"
+        if remote_ip and not is_server:
+            device_info += f", Remote IP: {remote_ip}"
+        print(f"{device_info}, 99.9% Latency: {lat} us")
+        return True
+
+    print(f"No data found for {local_device}")
+    return False
+
+
 def run_ib_client(args):
     """
     Run the ib_write_bw client command.
@@ -99,23 +136,7 @@ def run_ib_client(args):
         if result.returncode != 0:
             print(f"Client command failed, error: {result.stderr}")
             return
-        output = result.stdout
-        match = re.search(
-            r'#bytes\s+#iterations\s+BW peak\[Gb/sec\]\s+BW average\[Gb/sec\]\s+MsgRate\[Mpps\]\s*\n\s*\d+\s+\d+\s+[\d.]+\s+([\d.]+)\s+[\d.]+\s*',
-            output)
-        if match:
-            bw_avg = match.group(1)
-            print(
-                f"Local NIC: {local_device}, Rate: {get_ib_device_rate(local_device)}, Remote IP: {remote_ip}, Avg BW: {bw_avg} Gbps")
-        else:
-            match = re.search(
-                r'#bytes\s+#iterations\s+t_min\[usec\]\s+t_max\[usec\]\s+t_typical\[usec\]\s+t_avg\[usec\]\s+t_stdev\[usec\]\s+99%\spercentile\[usec\]\s+99.9%\spercentile\[usec\]\s*\n\s*\d+\s+\d+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+([\d.]+)',
-                output)
-            if match:
-                lat = match.group(1)
-                print(f"Local NIC: {local_device}, Remote IP: {remote_ip}, 99.9% Latency: {lat} us")
-            else:
-                print(f"No data found for {local_device}")
+        parse_benchmark_output(result.stdout, local_device, remote_ip, is_server=False)
     except Exception as e:
         print(f"Error running client: {e}")
 
@@ -134,25 +155,49 @@ def run_ib_server(args):
         if result.returncode != 0:
             print(f"Server command failed, error: {result.stderr}")
             return
-        output = result.stdout
-        match = re.search(
-            r'#bytes\s+#iterations\s+BW peak\[Gb/sec\]\s+BW average\[Gb/sec\]\s+MsgRate\[Mpps\]\s*\n\s*\d+\s+\d+\s+[\d.]+\s+([\d.]+)\s+[\d.]+\s*',
-            output)
-        if match:
-            bw_avg = match.group(1)
-            print(f"Server NIC {local_device}, Rate: {get_ib_device_rate(local_device)}, Avg BW: {bw_avg} Gbps")
-        else:
-            match = re.search(
-                r'#bytes\s+#iterations\s+t_min\[usec\]\s+t_max\[usec\]\s+t_typical\[usec\]\s+t_avg\[usec\]\s+t_stdev\[usec\]\s+99%\spercentile\[usec\]\s+99.9%\spercentile\[usec\]\s*\n\s*\d+\s+\d+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+([\d.]+)',
-                output)
-            if match:
-                lat = match.group(1)
-                print(f"Server NIC {local_device}, 99.9% Latency: {lat} us")
-            else:
-                print(f"No data found for {local_device}")
-
+        parse_benchmark_output(result.stdout, local_device, is_server=True)
     except Exception as e:
         print(f"Error running server: {e}")
+
+
+def build_tasks(local_ib_devices, cpu_topology, bench_numa, bench_devices, cmd, append_args, start_port, remote_ip=None):
+    """
+    Build tasks for running benchmark commands.
+    :param local_ib_devices: List of local IB devices.
+    :param cpu_topology: CPU topology dictionary.
+    :param bench_numa: NUMA node to filter (if specified).
+    :param bench_devices: List of devices to filter (if specified).
+    :param cmd: Command to execute.
+    :param append_args: Additional arguments to append.
+    :param start_port: Starting port number.
+    :param remote_ip: Remote IP address (for client mode, None for server mode).
+    :return: List of task tuples.
+    """
+    tasks = []
+    cpu_index = {numa: 0 for numa in cpu_topology}
+    for local_device in local_ib_devices:
+        numa = get_ib_device_numa(local_device)
+        if bench_numa and numa != int(bench_numa):
+            continue
+        if len(bench_devices) != 0 and local_device not in bench_devices:
+            continue
+        if numa is not None and numa in cpu_topology:
+            cpu_list = cpu_topology[numa]
+            if cpu_index[numa] < len(cpu_list):
+                cpu = cpu_list[cpu_index[numa]]
+                port = start_port + len(tasks)
+                if remote_ip is not None:
+                    # Client mode
+                    tasks.append((cmd, local_device, remote_ip, cpu, append_args, port))
+                else:
+                    # Server mode
+                    tasks.append((cmd, local_device, cpu, append_args, port))
+                cpu_index[numa] += 1
+            else:
+                print(f"Not enough CPUs for NIC {local_device} in NUMA node {numa}")
+        else:
+            print(f"No valid NUMA node or CPU list found for {local_device}")
+    return tasks
 
 
 if __name__ == "__main__":
@@ -194,54 +239,17 @@ if __name__ == "__main__":
     start_port = 18515
 
     if mode == "client":
-        tasks = []
-        cpu_index = {numa: 0 for numa in cpu_topology}
-        for local_device in local_ib_devices:
-            numa = get_ib_device_numa(local_device)
-            if bench_numa and numa != int(bench_numa):
-                continue
-            if len(bench_devices) !=0 and local_device not in bench_devices:
-                continue
-            if numa is not None and numa in cpu_topology:
-                cpu_list = cpu_topology[numa]
-                if cpu_index[numa] < len(cpu_list):
-                    cpu = cpu_list[cpu_index[numa]]
-                    port = start_port + len(tasks)
-                    tasks.append((cmd, local_device, remote_ip, cpu, append_args, port))
-                    cpu_index[numa] += 1
-                else:
-                    print(f"No enough CPUs for NIC {local_device} in NUMA node {numa}")
-            else:
-                print(f"No valid NUMA node or CPU list found for {local_device}")
+        tasks = build_tasks(local_ib_devices, cpu_topology, bench_numa, bench_devices, cmd, append_args, start_port, remote_ip)
         if concurrency == -1:
-            concurrency =  len(tasks)
+            concurrency = len(tasks)
         with Pool(processes=concurrency) as pool:
             pool.map(run_ib_client, tasks)
 
     elif mode == "server":
-        tasks = []
-        cpu_index = {numa: 0 for numa in cpu_topology}
-        for local_device in local_ib_devices:
-            numa = get_ib_device_numa(local_device)
-            if bench_numa and numa != int(bench_numa):
-                continue
-            if len(bench_devices) !=0 and local_device not in bench_devices:
-                continue
-            if numa is not None and numa in cpu_topology:
-                cpu_list = cpu_topology[numa]
-                if cpu_index[numa] < len(cpu_list):
-                    cpu = cpu_list[cpu_index[numa]]
-                    port = start_port + len(tasks)
-                    tasks.append((cmd, local_device, cpu, append_args, port))
-                    cpu_index[numa] += 1
-                else:
-                    print(f"No enough CPUs for NIC {local_device} in NUMA node {numa}")
-            else:
-                print(f"No valid NUMA node or CPU list found for {local_device}")
+        tasks = build_tasks(local_ib_devices, cpu_topology, bench_numa, bench_devices, cmd, append_args, start_port)
         with Pool() as pool:
             pool.map(run_ib_server, tasks)
 
     else:
         print("Invalid mode. Use 'client' or 'server'.")
         sys.exit(1)
-    
