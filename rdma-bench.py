@@ -194,7 +194,7 @@ def build_tasks(local_ib_devices, cpu_topology, bench_numa, bench_devices, cmd, 
                     tasks.append((cmd, local_device, cpu, append_args, port))
                 cpu_index[numa] += 1
             else:
-                print(f"No enough CPUs for NIC {local_device} in NUMA node {numa}")
+                print(f"Not enough CPUs for NIC {local_device} in NUMA node {numa}")
         else:
             print(f"No valid NUMA node or CPU list found for {local_device}")
     return tasks
